@@ -5,7 +5,7 @@ import type { ContextType, ReactElement } from "react";
 import type { GuardEvent } from "stellar-agent-guard-sdk";
 import { installDom, loadReact, sleep, type Act } from "./domHarness.ts";
 import { TelemetryFeed } from "../../components/TelemetryFeed.tsx";
-import { GuardContext } from "../../components/GuardProvider.tsx";
+import { GuardContext, GuardEventsContext } from "../../components/GuardProvider.tsx";
 import { SEVERITY_TIER, severityFor } from "../../lib/guard/feedSeverity.ts";
 
 installDom();
@@ -107,14 +107,27 @@ test("the tiers use the two existing tokens, not new colours", () => {
 
 type GuardContextValue = NonNullable<ContextType<typeof GuardContext>>;
 
-function contextFor(events: GuardEvent[]) {
+/**
+ * The session half of the guard context, with no network behind it.
+ *
+ * The rows themselves are *not* here: `TelemetryFeed` reads them from
+ * `GuardEventsContext`, so a stub carrying an `events` field would look right
+ * and render nothing. Every field the panel touches at render time is present —
+ * an omitted one is a `TypeError` in the component under test, not a gap in the
+ * fixture.
+ */
+function contextFor() {
   return {
-    events,
     guard: GUARD,
     feed: { watching: true, latestLedger: 1_000, error: null, lastPolledAt: null },
+    stream: { paused: false, pendingCount: 0, dropped: 0 },
     startWatching: () => {},
     stopWatching: () => {},
     clearEvents: () => {},
+    pauseStream: () => {},
+    resumeStream: () => {},
+    queryRange: async () => {},
+    rangeLabel: null,
   } as unknown as GuardContextValue;
 }
 
@@ -129,7 +142,13 @@ async function renderFeed(events: GuardEvent[]): Promise<{
   const root = createRoot(container);
   await act(async () => {
     root.render(
-      react.createElement(GuardContext.Provider, { value: contextFor(events) }, react.createElement(TelemetryFeed)),
+      react.createElement(
+        GuardContext.Provider,
+        { value: contextFor() },
+        // Two contexts, not one: `useGuardEvents` reads the live rows, which the
+        // provider deliberately keeps separate from the guard session.
+        react.createElement(GuardEventsContext.Provider, { value: events }, react.createElement(TelemetryFeed)),
+      ),
     );
   });
   await act(async () => {

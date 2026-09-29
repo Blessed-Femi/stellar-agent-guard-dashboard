@@ -27,6 +27,7 @@ import {
   type TelemetryFilter,
   type VerdictFilter,
 } from "../lib/guard/telemetryExport.ts";
+import { severityFor } from "../lib/guard/feedSeverity.ts";
 
 /** Human names for the topic filter's options, keyed by the topic symbol. */
 const TOPIC_LABELS: Record<string, string> = {
@@ -325,45 +326,6 @@ export function TelemetryFeed() {
               </tr>
             </thead>
             <tbody>
-              {events.map((event, index) => {
-                // O(1) from fields the decoder already produced — no topic or
-                // reason string is parsed to work out how loud the row is.
-                const severity = severityFor(event);
-                return (
-                  <tr
-                    key={`${event.topic}-${event.transactionHash ?? "-"}-${event.ledger ?? "-"}-${index}`}
-                    className={`severity-${severity}`}
-                    data-severity={severity}
-                    data-stream={event.source}
-                  >
-                    <td>
-                      <div>{labelFor(event)}</div>
-                      <div className="tiny muted mono">{describeGuardEvent(event)}</div>
-                    </td>
-                    <td>
-                      {event.decision ? (
-                        event.decision.result === "blocked" ? (
-                          <span className="pill danger">{event.decision.reason ?? "blocked"}</span>
-                        ) : (
-                          <span className="pill ok">allowed</span>
-                        )
-                      ) : (
-                        <span className="muted tiny">—</span>
-                      )}
-                      {event.decision?.result === "blocked" && event.decision.reason && (
-                        <div className="tiny muted">{explainReason(event.decision.reason)}</div>
-                      )}
-                    </td>
-                    <td>
-                      <span className={`pill${event.source === "diagnostic" ? " warn" : ""}`}>
-                        {event.source}
-                      </span>
-                    </td>
-                    <td className="mono tiny">{event.ledger ?? "—"}</td>
-                    <td>{event.transactionHash ? starLink(event.transactionHash) : <span className="tiny muted">none — never broadcast</span>}</td>
-                  </tr>
-                );
-              })}
               {rows.map((event) => (
                 <TelemetryRow key={eventKey(event)} event={event} />
               ))}
@@ -396,10 +358,15 @@ export function TelemetryFeed() {
  * React reconciles against the same uniqueness the feed guarantees: a new
  * event prepending shifts nothing, and no row is ever unmounted and rebuilt
  * merely because rows above it changed.
+ *
+ * Severity rides here, on the row's own attributes, so the tier costs no extra
+ * element and the cells stay exactly as they were — O(1) from fields the decoder
+ * already produced, with no topic or reason string parsed (see `severityFor`).
  */
 const TelemetryRow = memo(function TelemetryRow({ event }: { event: GuardEvent }) {
+  const severity = severityFor(event);
   return (
-    <tr>
+    <tr className={`severity-${severity}`} data-severity={severity} data-stream={event.source}>
       <td>
         <div>{labelFor(event)}</div>
         <div className="tiny muted mono">{describeGuardEvent(event)}</div>
