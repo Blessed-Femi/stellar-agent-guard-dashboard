@@ -21,7 +21,7 @@ import {
   type AssetCapChange,
 } from "../lib/guard/assetCapsCsv.ts";
 import { useGuard } from "./GuardProvider.tsx";
-import { ErrorBlock, ScopeNotice, starLink } from "./bits.tsx";
+import { ErrorBlock, ScopeNotice, WarningBanner, starLink } from "./bits.tsx";
 import { writeControlState } from "../lib/guard/observerMode.ts";
 
 /**
@@ -58,6 +58,10 @@ export function PolicyForm() {
   const validation = buildPolicyConfig(effective);
   const issues = validation.ok ? [] : validation.issues;
 
+  // Nothing installed is default-deny, not a blank slate: the form is where that
+  // state gets named before the operator is asked to fill anything in.
+  const policyState = policyStateFrom(snapshot?.status);
+
   // Every write here is inert for the same reason, in the same words as every
   // other write control in the console (issue #101).
   const installControl = writeControlState(wallet, {
@@ -71,6 +75,16 @@ export function PolicyForm() {
     label: "export the policy",
   });
   const revokeControl = writeControlState(wallet, { busy, label: "revoke the policy" });
+  // Revoking a policy that is not installed spends a signature and changes
+  // nothing, so the button is inert in exactly the state the banner warns about.
+  // The observer and in-flight reasons still win — "connect a wallet" is the
+  // more actionable sentence, and it is the one that stays true.
+  const nothingInstalled = policyState === "default-deny";
+  const revokeDisabled = revokeControl.disabled || nothingInstalled;
+  const revokeTitle =
+    !revokeControl.disabled && nothingInstalled
+      ? "No policy is installed, so there is nothing to revoke."
+      : revokeControl.title;
 
   function set<K extends keyof PolicyDraft>(key: K, value: PolicyDraft[K]) {
     setDraft((current) => ({ ...(current ?? installedDraft), [key]: value }));
@@ -463,8 +477,8 @@ export function PolicyForm() {
         </button>
         <button
           className="secondary"
-          disabled={revokeControl.disabled}
-          title={revokeControl.title}
+          disabled={revokeDisabled}
+          title={revokeTitle}
           onClick={() => void revoke()}
         >
           Revoke policy (default deny)

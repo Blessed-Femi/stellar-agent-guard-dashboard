@@ -235,6 +235,25 @@ export function GuardProvider({ children }: { children: ReactNode }) {
     lastPolledAt: null,
   });
 
+  /**
+   * The two event resets, declared beside the state they reset.
+   *
+   * `clearEvents` empties the table but keeps the dedupe set, so a poll cannot
+   * re-deliver what the operator just cleared. `resetEvents` drops the set too —
+   * required whenever the *guard* changes, or the new account's events would be
+   * swallowed as already-seen. Both are declared here rather than with the rest
+   * of the feed wiring because the deep-link effect below adopts a different
+   * guard before that wiring is reached.
+   */
+  const clearEvents = useCallback(() => {
+    setBuffer(clearStreamRows);
+    setRangeLabel(null);
+  }, []);
+  const resetEvents = useCallback(() => {
+    setBuffer(emptyStreamBuffer());
+    setRangeLabel(null);
+  }, []);
+
   // The feed instance is kept in a ref so a re-render never resets its cursor —
   // losing the cursor would silently re-scan and re-deliver events.
   const feedRef = useRef<GuardFeed | null>(null);
@@ -300,9 +319,8 @@ export function GuardProvider({ children }: { children: ReactNode }) {
     setGuard(requested.guard);
     setSnapshot(null);
     setSnapshotError(null);
-    setEvents([]);
-    seenRef.current = new Set();
-  }, [demo]);
+    resetEvents();
+  }, [demo, resetEvents]);
 
   // In demo mode the feed is seeded and watching immediately: a visitor should
   // see realistic telemetry without having to click "Start watching" first. The
@@ -586,16 +604,6 @@ export function GuardProvider({ children }: { children: ReactNode }) {
 
   const stopWatching = useCallback(() => {
     setFeed((current) => ({ ...current, watching: false }));
-  }, []);
-
-  const clearEvents = useCallback(() => {
-    setBuffer(clearStreamRows);
-    setRangeLabel(null);
-  }, []);
-  /** Drop everything, queued events and history included: a new guard or a locked session. */
-  const resetEvents = useCallback(() => {
-    setBuffer(emptyStreamBuffer());
-    setRangeLabel(null);
   }, []);
 
   // ── Historical range queries (#148) ──────────────────────────────────
