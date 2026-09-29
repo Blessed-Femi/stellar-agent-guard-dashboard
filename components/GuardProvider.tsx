@@ -26,11 +26,21 @@ import {
   type ReactNode,
 } from "react";
 import type { rpc } from "@stellar/stellar-sdk";
-import type { GuardEvent } from "stellar-agent-guard-sdk";
 import { createServer } from "../lib/guard/chain.ts";
 import { readGuardSnapshot, type GuardSnapshot } from "../lib/guard/guardOps.ts";
 import { NETWORK } from "../lib/guard/network.ts";
-import { GuardFeed } from "../lib/guard/telemetry.ts";
+import {
+  GuardFeed,
+  clearStreamRows,
+  emptyStreamBuffer,
+  eventKey,
+  historicalBuffer,
+  ingestEvents,
+  pauseStream as pauseBuffer,
+  resumeStream as resumeBuffer,
+  type StreamBuffer,
+  type TelemetryEvent,
+} from "../lib/guard/telemetry.ts";
 import { createTabSync, type TabSyncEventType } from "../lib/guard/tabSync.ts";
 import {
   KNOWN_INSTANCES,
@@ -116,7 +126,6 @@ interface GuardContextValue {
   snapshotError: string | null;
   refreshing: boolean;
   refresh: () => Promise<void>;
-  events: GuardEvent[];
   feed: {
     watching: boolean;
     latestLedger: number | null;
@@ -125,9 +134,22 @@ interface GuardContextValue {
   };
   startWatching: () => void;
   stopWatching: () => void;
+  /**
+   * Stream display controls. Pausing freezes the table while polling carries on
+   * in the background; new events queue until resume.
+   */
+  stream: {
+    paused: boolean;
+    pendingCount: number;
+    /** Queued events that fell past the buffer limit during a long pause. */
+    dropped: number;
+  };
+  pauseStream: () => void;
+  resumeStream: () => void;
+  /** Empty the visible list. The poll cursor and any queued events are kept. */
   clearEvents: () => void;
   /** Surface refused-write diagnostics in the feed, labelled as diagnostics. */
-  pushEvents: (events: GuardEvent[]) => void;
+  pushEvents: (events: TelemetryEvent[]) => void;
   /**
    * Query the feed's guard over a historical time range (#148). Replaces the
    * live view with the window's events and labels it, so a historical result
@@ -153,18 +175,19 @@ interface GuardContextValue {
 
 const GuardContext = createContext<GuardContextValue | null>(null);
 
-/** A stable identity for an event, so re-polling the same page cannot duplicate rows. */
-function eventKey(event: GuardEvent): string {
-  return [
-    event.source,
-    event.transactionHash ?? "-",
-    event.ledger ?? "-",
-    event.topic,
-    event.decision?.result ?? "-",
-    event.decision?.reason ?? "-",
-    typeof event.data === "object" && event.data !== null ? JSON.stringify(event.data) : String(event.data),
-  ].join("|");
-}
+/**
+ * The event feed lives in its own context, deliberately separate from the
+ * console's general state.
+ *
+ * The feed is the only high-churn state here: batches arrive on every poll (or,
+ * under the #114 benchmark's seam, on every animation frame), and if `events`
+ * rode along on `GuardContext` then every value's identity would change with
+ * every batch — re-rendering the wallet bar, status panel, panic panel and the
+ * rest for a change only the telemetry table can see. Splitting the feed out
+ * keeps the cost of a batch proportional to the one panel that renders it.
+ * Only `TelemetryFeed` subscribes.
+ */
+const GuardEventsContext = createContext<TelemetryEvent[] | null>(null);
 
 export function GuardProvider({ children }: { children: ReactNode }) {
   const server = useMemo(() => createServer(NETWORK.rpcUrl), []);
@@ -202,7 +225,7 @@ export function GuardProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<GuardSnapshot | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [events, setEvents] = useState<GuardEvent[]>([]);
+  const [buffer, setBuffer] = useState<StreamBuffer>(emptyStreamBuffer);
   const [rangeLabel, setRangeLabel] = useState<string | null>(null);
   const [feed, setFeed] = useState<GuardContextValue["feed"]>({
     watching: false,
@@ -214,7 +237,6 @@ export function GuardProvider({ children }: { children: ReactNode }) {
   // The feed instance is kept in a ref so a re-render never resets its cursor —
   // losing the cursor would silently re-scan and re-deliver events.
   const feedRef = useRef<GuardFeed | null>(null);
-  const seenRef = useRef<Set<string>>(new Set());
   // The active guard, readable from the (long-lived) sync listener without
   // re-subscribing on every guard change.
   const guardRef = useRef(guard);
@@ -251,7 +273,7 @@ export function GuardProvider({ children }: { children: ReactNode }) {
   // fixtures never touch RPC, so this cannot fire a chain read.
   useEffect(() => {
     if (!demo) return;
-    setEvents(demoEvents());
+    setBuffer(ingestEvents(emptyStreamBuffer(), demoEvents(), { dedupe: false }));
     setFeed((current) => ({ ...current, watching: true, latestLedger: DEMO_BASE_LEDGER, error: null }));
   }, [demo]);
 
@@ -443,8 +465,7 @@ export function GuardProvider({ children }: { children: ReactNode }) {
           setGuard(next);
           setSnapshot(null);
           setSnapshotError(null);
-          setEvents([]);
-          seenRef.current = new Set();
+          setBuffer(emptyStreamBuffer());
           return;
         }
         case "FREEZE_STATE_CHANGED":
@@ -473,9 +494,8 @@ export function GuardProvider({ children }: { children: ReactNode }) {
     (next: string) => {
       setGuard(next);
       setSnapshot(null);
-      setEvents([]);
+      setBuffer(emptyStreamBuffer());
       setRangeLabel(null);
-      seenRef.current = new Set();
       // Every other tab follows the operator's selection instead of continuing to
       // poll a guard they are no longer looking at.
       tabSync.broadcast("GUARD_CHANGED", { guard: next });
@@ -494,20 +514,32 @@ export function GuardProvider({ children }: { children: ReactNode }) {
     [tabSync],
   );
 
-  const pushEvents = useCallback((incoming: GuardEvent[]) => {
+  const pushEvents = useCallback((incoming: TelemetryEvent[]) => {
     if (incoming.length === 0) return;
-    setEvents((current) => {
-      const fresh = incoming.filter((event) => {
-        const key = eventKey(event);
-        if (seenRef.current.has(key)) return false;
-        seenRef.current.add(key);
-        return true;
-      });
-      if (fresh.length === 0) return current;
-      // Newest first, and bounded: the feed is a live view, not an archive.
-      return [...fresh, ...current].slice(0, 250);
-    });
+    // `ingestEvents` is pure — it copies `seen` rather than mutating it — so it
+    // is safe inside the updater even when StrictMode double-invokes it.
+    setBuffer((current) => ingestEvents(current, incoming));
   }, []);
+
+  const pauseStream = useCallback(() => setBuffer(pauseBuffer), []);
+  const resumeStream = useCallback(() => setBuffer((current) => resumeBuffer(current)), []);
+
+  // Benchmark seam (issue #114): the perf spec streams thousands of synthetic
+  // events through the feed at a controlled rate instead of waiting on the 5s
+  // poll cadence, so FPS and heap growth can be measured under sustained load.
+  // It is the same `pushEvents` the diagnostic path uses — no second write
+  // route — and it is stripped from production builds, where the only events
+  // are the ones actually polled from the chain.
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    const target = window as typeof window & {
+      __guardFeedInject?: (incoming: TelemetryEvent[]) => void;
+    };
+    target.__guardFeedInject = pushEvents;
+    return () => {
+      delete target.__guardFeedInject;
+    };
+  }, [pushEvents]);
 
   const startWatching = useCallback(() => {
     if (!demo && (!feedRef.current || feedRef.current.guard !== guard)) {
@@ -521,9 +553,13 @@ export function GuardProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const clearEvents = useCallback(() => {
-    setEvents([]);
+    setBuffer(clearStreamRows);
     setRangeLabel(null);
-    seenRef.current = new Set();
+  }, []);
+  /** Drop everything, queued events and history included: a new guard or a locked session. */
+  const resetEvents = useCallback(() => {
+    setBuffer(emptyStreamBuffer());
+    setRangeLabel(null);
   }, []);
 
   // ── Historical range queries (#148) ──────────────────────────────────
@@ -552,8 +588,7 @@ export function GuardProvider({ children }: { children: ReactNode }) {
             const closedAt = Math.floor(new Date(event.ledgerClosedAt).getTime() / 1000);
             return closedAt >= from && closedAt <= to;
           });
-        setEvents(inRange);
-        seenRef.current = new Set(inRange.map(eventKey));
+        setBuffer(historicalBuffer(inRange));
         setRangeLabel(label);
         return;
       }
@@ -565,10 +600,9 @@ export function GuardProvider({ children }: { children: ReactNode }) {
       setFeed((current) => ({ ...current, error: null }));
       try {
         const page = await feedRunner.pollRange(range);
-        setEvents(page.events);
-        // seenRef is rebuilt so returning to the live tail does not re-suppress
-        // rows this historical view already displayed.
-        seenRef.current = new Set(page.events.map(eventKey));
+        // `seen` is rebuilt from the window so returning to the live tail does
+        // not re-suppress rows this historical view already displayed.
+        setBuffer(historicalBuffer(page.events));
         setRangeLabel(label);
       } catch (error) {
         setFeed((current) => ({
@@ -588,8 +622,8 @@ export function GuardProvider({ children }: { children: ReactNode }) {
   const [idleTimeoutMs, setIdleTimeoutMs] = useState<number>(() => loadIdleTimeoutMs());
   const handleIdleExpire = useCallback(() => {
     disconnect();
-    clearEvents();
-  }, [disconnect, clearEvents]);
+    resetEvents();
+  }, [disconnect, resetEvents]);
   const { state: idleState, stayConnected } = useIdleTimer({
     timeoutMs: idleTimeoutMs,
     enabled: wallet !== null,
@@ -612,7 +646,9 @@ export function GuardProvider({ children }: { children: ReactNode }) {
         if (demoCancelled) return;
         const event = syntheticDemoEvent(sequence, Date.now());
         sequence += 1;
-        setEvents((current) => [event, ...current].slice(0, 250));
+        // Demo events can repeat fields (two identical refusals), so skip
+        // dedupe: each synthetic event is a distinct occurrence.
+        setBuffer((current) => ingestEvents(current, [event], { dedupe: false }));
         setFeed((current) => ({
           ...current,
           latestLedger: DEMO_BASE_LEDGER + sequence,
@@ -658,71 +694,122 @@ export function GuardProvider({ children }: { children: ReactNode }) {
     };
   }, [feed.watching, pushEvents, demo]);
 
-  const value: GuardContextValue = {
-    server,
-    wallet,
-    walletError,
-    connecting,
-    connect,
-    disconnect,
-    signer,
-    providerId,
-    availableProviders,
-    observer: isObserverSession(wallet),
-    networkMismatch,
-    switchNetwork,
-    instances,
-    guard,
-    selectGuard,
-    addInstance,
-    snapshot,
-    snapshotError,
-    refreshing,
-    refresh,
-    events,
-    feed,
-    startWatching,
-    stopWatching,
-    clearEvents,
-    pushEvents,
-    queryRange,
-    rangeLabel,
-    notifyTabs,
-    session: {
-      state: idleState,
-      timeoutMs: idleTimeoutMs,
-      setTimeoutMs: setIdleTimeout,
+  // Built from primitives so a live batch — which replaces `buffer` but leaves
+  // these unchanged — does not change the context value's identity.
+  const { paused, dropped } = buffer;
+  const pendingCount = buffer.pending.length;
+  const stream = useMemo(() => ({ paused, pendingCount, dropped }), [paused, pendingCount, dropped]);
+
+  // Memoised so an `events` batch — the frequent update — cannot change this
+  // object's identity and re-render every consumer that has nothing to do with
+  // the feed. All fields below are the context's own deps.
+  const value = useMemo<GuardContextValue>(
+    () => ({
+      server,
+      wallet,
+      walletError,
+      connecting,
+      connect,
+      disconnect,
+      signer,
+      providerId,
+      availableProviders,
+      observer: isObserverSession(wallet),
+      networkMismatch,
+      switchNetwork,
+      instances,
+      guard,
+      selectGuard,
+      addInstance,
+      snapshot,
+      snapshotError,
+      refreshing,
+      refresh,
+      feed,
+      stream,
+      pauseStream,
+      resumeStream,
+      startWatching,
+      stopWatching,
+      clearEvents,
+      pushEvents,
+      queryRange,
+      rangeLabel,
+      notifyTabs,
+      session: {
+        state: idleState,
+        timeoutMs: idleTimeoutMs,
+        setTimeoutMs: setIdleTimeout,
+        stayConnected,
+      },
+    }),
+    [
+      server,
+      wallet,
+      walletError,
+      connecting,
+      connect,
+      disconnect,
+      signer,
+      providerId,
+      availableProviders,
+      networkMismatch,
+      switchNetwork,
+      instances,
+      guard,
+      selectGuard,
+      addInstance,
+      snapshot,
+      snapshotError,
+      refreshing,
+      refresh,
+      feed,
+      stream,
+      pauseStream,
+      resumeStream,
+      startWatching,
+      stopWatching,
+      clearEvents,
+      pushEvents,
+      queryRange,
+      rangeLabel,
+      notifyTabs,
+      idleState,
+      idleTimeoutMs,
+      setIdleTimeout,
       stayConnected,
-    },
-  };
+    ],
+  );
 
   return (
     <GuardContext.Provider value={value}>
-      {children}
-      {idleState.phase === "warning" && wallet && (
-        <div className="modal-backdrop">
-          <div
-            className="modal"
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="session-lock-title"
-            aria-describedby="session-lock-body"
-            tabIndex={-1}
-          >
-            <strong id="session-lock-title">
-              Session expiring due to inactivity. Click to stay connected.
-            </strong>
-            <p className="tiny" id="session-lock-body">
-              You will be disconnected in {idleState.secondsLeft}s. The admin wallet will be
-              unlinked and unsaved work dropped; reconnecting is required before anything can be
-              signed again.
-            </p>
-            <div className="row">
-              <button onClick={stayConnected}>Stay connected</button>
+      <GuardEventsContext.Provider value={buffer.rows}>
+        {children}
+        {idleState.phase === "warning" && wallet && (
+          <div className="modal-backdrop">
+            <div
+              className="modal"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="session-lock-title"
+              aria-describedby="session-lock-body"
+              tabIndex={-1}
+            >
+              <strong id="session-lock-title">
+                Session expiring due to inactivity. Click to stay connected.
+              </strong>
+              <p className="tiny" id="session-lock-body">
+                You will be disconnected in {idleState.secondsLeft}s. The admin wallet will be
+                unlinked and unsaved work dropped; reconnecting is required before anything can be
+                signed again.
+              </p>
+              <div className="row">
+                <button onClick={stayConnected}>Stay connected</button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </GuardEventsContext.Provider>
     </GuardContext.Provider>
   );
 }
@@ -733,4 +820,11 @@ export function useGuard(): GuardContextValue {
   return value;
 }
 
-export { eventKey, GuardContext };
+/** The live event feed, newest first — see `GuardEventsContext`. */
+export function useGuardEvents(): TelemetryEvent[] {
+  const value = useContext(GuardEventsContext);
+  if (value === null) throw new Error("useGuardEvents must be used inside <GuardProvider>");
+  return value;
+}
+
+export { eventKey, GuardContext, GuardEventsContext };
