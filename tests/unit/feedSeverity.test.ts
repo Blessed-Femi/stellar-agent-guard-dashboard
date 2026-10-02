@@ -53,13 +53,17 @@ const BLOCKED = event({
   // A refusal rolls its event back, so there is no transaction and no ledger.
   ledger: null,
   transactionHash: null,
-  decision: { result: "blocked", reason: "per_tx_cap_exceeded" } as GuardEvent["decision"],
+  decision: {
+    result: "blocked",
+    reason: "per_tx_cap_exceeded",
+    source: "diagnostic",
+  } as GuardEvent["decision"],
 });
 
 const ALLOWED = event({
   kind: "auth_checked",
   source: "ledger",
-  decision: { result: "allowed", reason: null } as GuardEvent["decision"],
+  decision: { result: "allowed", reason: null, source: "ledger" } as GuardEvent["decision"],
 });
 
 const LIFECYCLE = event({
@@ -89,7 +93,17 @@ test("severityFor reads decoded fields only, one branch per row", () => {
   // A blocked decision is a block whichever stream carried it — the decision
   // outranks the stream.
   assert.equal(
-    severityFor(event({ kind: "auth_checked", source: "ledger", decision: { result: "blocked", reason: "frozen" } as GuardEvent["decision"] })),
+    severityFor(
+      event({
+        kind: "auth_checked",
+        source: "ledger",
+        decision: {
+          result: "blocked",
+          reason: "admin_frozen",
+          source: "ledger",
+        } as GuardEvent["decision"],
+      }),
+    ),
     "blocked",
   );
 });
@@ -147,14 +161,19 @@ async function renderFeed(events: GuardEvent[]): Promise<{
         { value: contextFor() },
         // Two contexts, not one: `useGuardEvents` reads the live rows, which the
         // provider deliberately keeps separate from the guard session.
-        react.createElement(GuardEventsContext.Provider, { value: events }, react.createElement(TelemetryFeed)),
+        react.createElement(
+          GuardEventsContext.Provider,
+          { value: events },
+          react.createElement(TelemetryFeed),
+        ),
       ),
     );
   });
   await act(async () => {
     await sleep(10);
   });
-  const rows = () => Array.from(container.querySelectorAll<HTMLTableRowElement>("table.events tbody tr"));
+  const rows = () =>
+    Array.from(container.querySelectorAll<HTMLTableRowElement>("table.events tbody tr"));
   return {
     container,
     rows,
@@ -195,7 +214,11 @@ test("an allowed row is neutral and raises no alarm", async () => {
     const row = rendered.rowFor("allowed");
     assert.ok(row.classList.contains("severity-allowed"));
     assert.equal(row.dataset.stream, "ledger");
-    assert.equal(row.querySelector(".pill.danger"), null, "an allowed row must not look like a block");
+    assert.equal(
+      row.querySelector(".pill.danger"),
+      null,
+      "an allowed row must not look like a block",
+    );
     assert.match(row.textContent ?? "", /allowed/);
   } finally {
     await rendered.unmount();

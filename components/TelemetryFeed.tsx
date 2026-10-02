@@ -3,7 +3,7 @@
 import { memo, useState } from "react";
 import { describeGuardEvent, explainReason, GUARD_EVENT_TOPICS } from "stellar-agent-guard-sdk";
 import type { GuardEvent } from "stellar-agent-guard-sdk";
-import { STREAM_BUFFER_LIMIT } from "../lib/guard/telemetry.ts";
+import { STREAM_BUFFER_LIMIT, type TelemetryEvent } from "../lib/guard/telemetry.ts";
 import { useGuard, useGuardEvents } from "./GuardProvider.tsx";
 import { TelemetryAlerts } from "./TelemetryAlerts.tsx";
 import { TelemetryChart } from "./TelemetryChart.tsx";
@@ -417,11 +417,8 @@ export function TelemetryFeed() {
  * element and the cells stay exactly as they were — O(1) from fields the decoder
  * already produced, with no topic or reason string parsed (see `severityFor`).
  */
-const TelemetryRow = memo(function TelemetryRow({ event }: { event: GuardEvent }) {
-  const severity = severityFor(event);
-import type { TelemetryEvent } from "../lib/guard/telemetry.ts";
-
 const TelemetryRow = memo(function TelemetryRow({ event }: { event: TelemetryEvent }) {
+  const severity = severityFor(event);
   const iso = event.ledgerClosedAt ?? event.observedAt ?? null;
   return (
     <tr className={`severity-${severity}`} data-severity={severity} data-stream={event.source}>
