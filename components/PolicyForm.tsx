@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { PolicyDraft } from "../lib/guard/policyForm.ts";
 import {
   EMPTY_DRAFT,
@@ -17,6 +17,7 @@ import {
   type SecurityProfile,
 } from "../lib/guard/presets.ts";
 import { installPolicy, revokePolicy } from "../lib/guard/guardOps.ts";
+import { historyShortcut, useHistoryState } from "../lib/guard/useHistoryState.ts";
 import { computePolicyDiff, type PolicyDiff } from "../lib/guard/policyDiff.ts";
 import { PolicyDiffModal } from "./PolicyDiffModal.tsx";
 import type { InvokeResult } from "../lib/guard/submit.ts";
@@ -50,7 +51,15 @@ export function PolicyForm() {
   // `null` means "not edited yet", which is what lets the form seed itself from
   // the installed policy without an effect: the seed is derived during render and
   // the operator's first keystroke takes over from it.
-  const [draft, setDraft] = useState<PolicyDraft | null>(null);
+  const {
+    state: draft,
+    push: setDraft,
+    edit: editDraft,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+  } = useHistoryState<PolicyDraft | null>(null);
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<
     { kind: "invalid"; issues: string[] } | { kind: "invoked"; result: InvokeResult } | null
@@ -166,12 +175,20 @@ export function PolicyForm() {
       ? "No policy is installed, so there is nothing to revoke."
       : revokeControl.title;
 
-  function set<K extends keyof PolicyDraft>(key: K, value: PolicyDraft[K]) {
-    setDraft((current) => ({ ...(current ?? installedDraft), [key]: value }));
+  // Text edits are coalesced into one history step (see useHistoryState); every
+  // other change (toggles, row removal, clear, import) is a step of its own.
+  function set<K extends keyof PolicyDraft>(
+    key: K,
+    value: PolicyDraft[K],
+    mode: "commit" | "text" = "commit",
+  ) {
+    const next = { ...effective, [key]: value };
+    if (mode === "text") editDraft(next);
+    else setDraft(next);
   }
 
-  function updateAssetCaps(next: PolicyDraft["assetCaps"]) {
-    set("assetCaps", next);
+  function updateAssetCaps(next: PolicyDraft["assetCaps"], mode: "commit" | "text" = "commit") {
+    set("assetCaps", next, mode);
   }
 
   async function importAssetCaps(file: File, format: "csv" | "json") {
@@ -268,9 +285,55 @@ export function PolicyForm() {
     }
   }
 
+  function undoEdit() {
+    if (busy || !canUndo) return;
+    undo();
+    setAssetCapChanges({});
+  }
+
+  function redoEdit() {
+    if (busy || !canRedo) return;
+    redo();
+    setAssetCapChanges({});
+  }
+
+  // Attached to the form container, so the shortcuts only act while focus is inside
+  // it. preventDefault also stops the browser's own per-field undo fighting ours.
+  function onKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    const action = historyShortcut(event);
+    if (!action) return;
+    event.preventDefault();
+    if (action === "undo") undoEdit();
+    else redoEdit();
+  }
+
   return (
-    <div className="panel">
-      <h2>Guardrail policy</h2>
+    <div className="panel" onKeyDown={onKeyDown}>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+        <h2 style={{ margin: 0 }}>Guardrail policy</h2>
+        <div className="row">
+          <button
+            className="secondary"
+            type="button"
+            onClick={undoEdit}
+            disabled={busy || !canUndo}
+            title="Undo (Ctrl+Z / Cmd+Z)"
+            aria-label="Undo"
+          >
+            Undo
+          </button>
+          <button
+            className="secondary"
+            type="button"
+            onClick={redoEdit}
+            disabled={busy || !canRedo}
+            title="Redo (Ctrl+Shift+Z / Cmd+Shift+Z / Ctrl+Y)"
+            aria-label="Redo"
+          >
+            Redo
+          </button>
+        </div>
+      </div>
       <ScopeNotice />
 
       {policyState === "default-deny" && (
@@ -340,7 +403,7 @@ export function PolicyForm() {
             <input
               value={effective.perTxCap}
               inputMode="numeric"
-              onChange={(event) => set("perTxCap", event.target.value)}
+              onChange={(event) => set("perTxCap", event.target.value, "text")}
               placeholder="1000"
             />
             <span className="hint">Largest single SAC transfer the account will authorize.</span>
@@ -351,7 +414,7 @@ export function PolicyForm() {
             <input
               value={effective.windowCap}
               inputMode="numeric"
-              onChange={(event) => set("windowCap", event.target.value)}
+              onChange={(event) => set("windowCap", event.target.value, "text")}
               placeholder="150"
             />
             <span className="hint">
@@ -365,7 +428,7 @@ export function PolicyForm() {
             <input
               value={effective.windowSecs}
               inputMode="numeric"
-              onChange={(event) => set("windowSecs", event.target.value)}
+              onChange={(event) => set("windowSecs", event.target.value, "text")}
               placeholder="86400"
             />
             <span className="hint">How far back the rolling sum looks.</span>
@@ -376,7 +439,7 @@ export function PolicyForm() {
             <input
               value={effective.dmsGraceSecs}
               inputMode="numeric"
-              onChange={(event) => set("dmsGraceSecs", event.target.value)}
+              onChange={(event) => set("dmsGraceSecs", event.target.value, "text")}
               placeholder="skip"
             />
             <span className="hint">
@@ -390,14 +453,14 @@ export function PolicyForm() {
             <input
               value={effective.activeFrom}
               inputMode="numeric"
-              onChange={(event) => set("activeFrom", event.target.value)}
+              onChange={(event) => set("activeFrom", event.target.value, "text")}
               placeholder="from"
               aria-label="Active from"
             />
             <input
               value={effective.activeUntil}
               inputMode="numeric"
-              onChange={(event) => set("activeUntil", event.target.value)}
+              onChange={(event) => set("activeUntil", event.target.value, "text")}
               placeholder="until"
               aria-label="Active until"
             />
@@ -410,7 +473,7 @@ export function PolicyForm() {
             <textarea
               rows={3}
               value={effective.assets}
-              onChange={(event) => set("assets", event.target.value)}
+              onChange={(event) => set("assets", event.target.value, "text")}
               placeholder="CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"
             />
             <span className="hint">
@@ -510,7 +573,7 @@ export function PolicyForm() {
                           onChange={(event) => {
                             const next = [...effective.assetCaps];
                             next[index] = { ...row, assetContractAddress: event.target.value };
-                            updateAssetCaps(next);
+                            updateAssetCaps(next, "text");
                           }}
                         />
                         {assetCapChanges[row.assetContractAddress] && (
@@ -527,7 +590,7 @@ export function PolicyForm() {
                           onChange={(event) => {
                             const next = [...effective.assetCaps];
                             next[index] = { ...row, maxCapStroops: event.target.value };
-                            updateAssetCaps(next);
+                            updateAssetCaps(next, "text");
                           }}
                         />
                       </td>
@@ -538,7 +601,7 @@ export function PolicyForm() {
                           onChange={(event) => {
                             const next = [...effective.assetCaps];
                             next[index] = { ...row, symbol: event.target.value };
-                            updateAssetCaps(next);
+                            updateAssetCaps(next, "text");
                           }}
                         />
                       </td>
@@ -568,7 +631,7 @@ export function PolicyForm() {
             <textarea
               rows={3}
               value={effective.recipients}
-              onChange={(event) => set("recipients", event.target.value)}
+              onChange={(event) => set("recipients", event.target.value, "text")}
               placeholder="GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"
             />
           </label>
@@ -593,7 +656,7 @@ export function PolicyForm() {
             <textarea
               rows={3}
               value={effective.protocols}
-              onChange={(event) => set("protocols", event.target.value)}
+              onChange={(event) => set("protocols", event.target.value, "text")}
               placeholder="C…  or  C…:swap,deposit   (no colon = any function)"
             />
             <span className="hint">
