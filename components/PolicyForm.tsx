@@ -35,7 +35,6 @@ import { ErrorBlock, ScopeNotice, WarningBanner, starLink } from "./bits.tsx";
 import { CsvImportExport } from "./CsvImportExport.tsx";
 import { PolicySimulationView } from "./PolicySimulationView.tsx";
 import { fetchTokenMetadata } from "../lib/guard/tokenMetadata.ts";
-import { ErrorBlock, ScopeNotice, starLink } from "./bits.tsx";
 import { writeControlState } from "../lib/guard/observerMode.ts";
 
 /**

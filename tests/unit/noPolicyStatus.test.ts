@@ -5,7 +5,7 @@ import type { ContextType, ReactElement } from "react";
 import { installDom, loadReact, sleep, type Act } from "./domHarness.ts";
 import { StatusPanel } from "../../components/StatusPanel.tsx";
 import { PolicyForm } from "../../components/PolicyForm.tsx";
-import { GuardContext } from "../../components/GuardProvider.tsx";
+import { GuardContext, GuardEventsContext } from "../../components/GuardProvider.tsx";
 import { NO_POLICY_CONSEQUENCE, policyStateFrom } from "../../lib/guard/policyState.ts";
 import { configureHref, resolveGuardFromSearch } from "../../lib/guard/deeplink.ts";
 import type { GuardSnapshot } from "../../lib/guard/guardOps.ts";
@@ -109,10 +109,7 @@ interface Rendered {
   unmount: () => Promise<void>;
 }
 
-async function renderGuarded(
-  panel: ReactElement,
-  context: TestContext,
-): Promise<Rendered> {
+async function renderGuarded(panel: ReactElement, context: TestContext): Promise<Rendered> {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -120,9 +117,9 @@ async function renderGuarded(
     await act(async () => {
       root.render(
         react.createElement(
-          GuardContext.Provider,
-          { value: value as GuardContextValue },
-          panel,
+          GuardEventsContext.Provider,
+          { value: [] },
+          react.createElement(GuardContext.Provider, { value: value as GuardContextValue }, panel),
         ),
       );
     });
@@ -199,7 +196,11 @@ test("no policy installed: the warning banner states the consequence and offers 
 
 test("a policy on chain means no default-deny banner (no false alarm)", async () => {
   await withStatusPanel(contextFor(snapshotWith(true)), (container) => {
-    assert.equal(banner(container), null, "an installed policy must not raise the default-deny banner");
+    assert.equal(
+      banner(container),
+      null,
+      "an installed policy must not raise the default-deny banner",
+    );
     assert.doesNotMatch(container.textContent ?? "", /ALL transactions are blocked/);
   });
 });
@@ -310,7 +311,10 @@ test("the CTA carries the guard being looked at, and the landing page adopts it"
   // Nothing to adopt: absent, malformed, or already selected.
   assert.equal(resolveGuardFromSearch({ search: "", registry: [], current: GUARD }), null);
   assert.equal(resolveGuardFromSearch({ search: "?guard=nope", registry: [], current: "" }), null);
-  assert.equal(resolveGuardFromSearch({ search: `?guard=${GUARD}`, registry: [], current: GUARD }), null);
+  assert.equal(
+    resolveGuardFromSearch({ search: `?guard=${GUARD}`, registry: [], current: GUARD }),
+    null,
+  );
 });
 
 // ── The shared tier ─────────────────────────────────────────────────────────
@@ -322,7 +326,7 @@ test("the warning banner reuses the shared notice tier the stylesheet defines", 
   assert.match(css, /\.notice\.info\s*\{/);
   // Printing the compliance report must not turn the banner into black text on
   // a black box, so the tier needs a print treatment.
-  assert.match(css, /@media print[\s\S]*\.notice, \.notice\.danger, \.notice\.info\s*\{/);
+  assert.match(css, /@media print[\s\S]*\.notice,\s*\.notice\.danger,\s*\.notice\.info\s*\{/);
 });
 
 function buttonByText(container: HTMLElement, text: string): HTMLButtonElement {

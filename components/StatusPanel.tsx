@@ -3,8 +3,16 @@
 import Link from "next/link";
 import { deadManRemaining, describePolicy, isDeadManFrozen } from "stellar-agent-guard-sdk";
 import { useGuard } from "./GuardProvider.tsx";
-import { ErrorBlock, Read, Stat, WarningBanner, relativeTime, short } from "./bits.tsx";
-import { ErrorBlock, Read, ReadSkeleton, ReadWithRetry, Stat, TimeAgo, short } from "./bits.tsx";
+import {
+  ErrorBlock,
+  Read,
+  ReadSkeleton,
+  ReadWithRetry,
+  Stat,
+  TimeAgo,
+  WarningBanner,
+  short,
+} from "./bits.tsx";
 import { CopyButton } from "./CopyButton.tsx";
 import { PHASE1_ARTIFACT, NETWORK } from "../lib/guard/network.ts";
 import { configureHref } from "../lib/guard/deeplink.ts";
@@ -74,14 +82,13 @@ export function StatusPanel() {
   const { snapshot, snapshotError, refreshing, refresh, guard, wallet, retryRead, retryingField } =
     useGuard();
 
-  const printReport = snapshot ? compilePrintReport(snapshot, NETWORK.name, wallet?.address || "Disconnected") : null;
+  const printReport = snapshot
+    ? compilePrintReport(snapshot, NETWORK.name, wallet?.address || "Disconnected")
+    : null;
   // Derived from this render's read, never from an event: a revoke done here, in
   // another tab, or by the agent's own tooling shows up on the next poll. An
   // unreadable `status()` yields `unknown`, which claims nothing.
   const policyState = policyStateFrom(snapshot?.status);
-  const printReport = snapshot
-    ? compilePrintReport(snapshot, NETWORK.name, wallet?.address || "Disconnected")
-    : null;
 
   // Proactive deadline alert: evaluated only from a successful status read (a
   // failed read must never fabricate a countdown), with a failed policy read
@@ -130,84 +137,19 @@ export function StatusPanel() {
 
         {!snapshot && !snapshotError && <p className="muted tiny">Reading the chain…</p>}
 
-      {policyState === "default-deny" && (
-        <WarningBanner
-          title="No policy installed — this account is in default-deny"
-          action={
-            <Link className="cta" href={configureHref(guard)}>
-              Configure a policy for this account
-            </Link>
-          }
-        >
-          <span className="tiny">{NO_POLICY_CONSEQUENCE}</span>
-        </WarningBanner>
-      )}
+        {policyState === "default-deny" && (
+          <WarningBanner
+            title="No policy installed — this account is in default-deny"
+            action={
+              <Link className="cta" href={configureHref(guard)}>
+                Configure a policy for this account
+              </Link>
+            }
+          >
+            <span className="tiny">{NO_POLICY_CONSEQUENCE}</span>
+          </WarningBanner>
+        )}
 
-      {snapshot && (
-        <>
-          <div className="grid" style={{ marginTop: 12 }}>
-            <Stat
-              label="Admin freeze"
-              tone={snapshot.status.ok ? (snapshot.status.value.admin_frozen ? "danger" : "ok") : undefined}
-              value={
-                <Read
-                  result={snapshot.status}
-                  label="status()"
-                  render={(status) => (status.admin_frozen ? "FROZEN" : "clear")}
-                />
-              }
-              note="Set by the panic button; cleared by unfreeze()"
-            />
-            <Stat
-              label="Dead-man switch"
-              tone={
-                snapshot.status.ok ? (snapshot.status.value.heartbeat_expired ? "danger" : "ok") : undefined
-              }
-              value={
-                <Read
-                  result={snapshot.status}
-                  label="status()"
-                  render={(status) =>
-                    isDeadManFrozen(status) ? "FIRED" : status.heartbeat_expired ? "expired" : "within grace"
-                  }
-                />
-              }
-              note={
-                <Read
-                  result={snapshot.status}
-                  label="status()"
-                  render={(status) => {
-                    const policy = snapshot.policy.ok ? snapshot.policy.value : null;
-                    const remaining = deadManRemaining(status, policy);
-                    if (remaining === null) return "switch disabled (grace 0)";
-                    if (remaining < 0n) return "grace elapsed; account refuses calls";
-                    return `${remaining}s of grace left`;
-                  }}
-                />
-              }
-            />
-            <Stat
-              label="Policy installed"
-              tone={policyState === "default-deny" ? "warn" : undefined}
-              value={<Read result={snapshot.status} label="status()" render={(s) => (s.has_policy ? "yes" : "no — default deny")} />}
-              note="With no policy the account refuses every call"
-            />
-            <Stat
-              label="Last heartbeat"
-              value={
-                <Read
-                  result={snapshot.status}
-                  label="status()"
-                  render={(status) =>
-                    status.last_heartbeat === 0n
-                      ? "never"
-                      : `${Number(status.last_heartbeat)} (ledger time)`
-                  }
-                />
-              }
-              note="Written by the agent's own heartbeat(), not by this console"
-            />
-          </div>
         {snapshot && (
           <>
             <div className="grid" style={{ marginTop: 12 }}>
@@ -269,6 +211,7 @@ export function StatusPanel() {
               />
               <Stat
                 label="Policy installed"
+                tone={policyState === "default-deny" ? "warn" : undefined}
                 value={
                   <Read
                     result={snapshot.status}
@@ -415,8 +358,12 @@ export function StatusPanel() {
               retrying={retryingField === "policy"}
               render={(policy) =>
                 policy === null ? (
-                  <p className="tiny muted">
-                    No policy installed — the account is in default-deny.
+                  // Not muted: this is the state of the account, not a footnote
+                  // under it. The consequence is spelled out in the banner above.
+                  <p className="tiny">
+                    <strong>No policy is stored on this account</strong> — nothing has been
+                    installed, or it was revoked. The account is in default-deny until a policy is
+                    installed.
                   </p>
                 ) : (
                   <>
@@ -469,19 +416,6 @@ export function StatusPanel() {
               }
             />
 
-          <h3>Policy in force</h3>
-          <Read
-            result={snapshot.policy}
-            label="policy()"
-            render={(policy) =>
-              policy === null ? (
-                // Not muted: this is the state of the account, not a footnote
-                // under it. The consequence is spelled out in the banner above.
-                <p className="tiny">
-                  <strong>No policy is stored on this account</strong> — nothing has been installed,
-                  or it was revoked. The account is in default-deny until a policy is installed.
-                </p>
-              ) : (
             <h3>Artifact identity</h3>
             {retryingField === "identity" && <ReadSkeleton label="identity" />}
             <ReadWithRetry

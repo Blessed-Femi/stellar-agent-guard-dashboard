@@ -37,9 +37,7 @@ export const NO_POLICY_CONSEQUENCE =
   "(default-deny). The contract answers `check()` with `no_policy` and refuses every call.";
 
 /** Derive the policy state from a live `status()` read, or from its absence. */
-export function policyStateFrom(
-  status: ReadResult<GuardStatus> | null | undefined,
-): PolicyState {
+export function policyStateFrom(status: ReadResult<GuardStatus> | null | undefined): PolicyState {
   if (!status || !status.ok) return "unknown";
   return status.value.has_policy ? "installed" : "default-deny";
 }

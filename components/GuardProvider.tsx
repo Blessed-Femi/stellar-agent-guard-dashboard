@@ -277,9 +277,6 @@ export function GuardProvider({ children }: { children: ReactNode }) {
     setRangeLabel(null);
   }, []);
 
-  // The feed instance is kept in a ref so a re-render never resets its cursor —
-  // losing the cursor would silently re-scan and re-deliver events.
-  const feedRef = useRef<GuardFeed | null>(null);
   // The active feed is reached only through an identity-keyed coordinator, so a
   // guard switch can never resume the previous guard's cursor onto a different
   // stream — the coordinator replaces the feed, it does not re-point it. The

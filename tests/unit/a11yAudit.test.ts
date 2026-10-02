@@ -200,7 +200,11 @@ test("StatusPanel passes axe-core with the default-deny banner showing", async (
   };
   const context = { ...TEST_GUARD, snapshot: noPolicy };
   const rendered = await renderPanel(
-    react.createElement(GuardContext.Provider, { value: context }, react.createElement(StatusPanel)),
+    react.createElement(
+      GuardContext.Provider,
+      { value: context },
+      react.createElement(StatusPanel),
+    ),
   );
   try {
     assert.ok(

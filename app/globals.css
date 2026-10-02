@@ -360,6 +360,8 @@ label.field .hint {
 .notice .cta {
   display: inline-block;
   margin-top: 8px;
+}
+
 /*
  * Freeze dry-run output. Visually distinct from a write receipt (banner plus a
  * bordered panel) so a simulation can never be mistaken for a broadcast freeze.
@@ -810,7 +812,9 @@ code {
    * become white rather than leaving black text on a black box. The two
    * intensities lose their colour difference on paper by design: what separates
    * them is the wording, which is why the copy names the consequence. */
-  .notice, .notice.danger, .notice.info {
+  .notice,
+  .notice.danger,
+  .notice.info {
     background: white !important;
     color: black !important;
     border: 1px solid black !important;
